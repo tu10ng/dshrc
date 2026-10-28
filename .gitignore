@@ -1,0 +1,9 @@
+node_modules/
+*.tmp-dshrc
+*.log
+
+# Editor and OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

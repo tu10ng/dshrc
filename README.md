@@ -1,0 +1,151 @@
+# dshrc
+
+**中文** · [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（dsh）的个人 rc：像 Emacs 的 `init.el` 一样，放一些改变 dsh 行为、但还没复杂到需要做成包的片段。
+
+## 为什么
+
+dsh 的一切都是 Cordis 插件，这很好；但哪怕只想加一条 system prompt 规则、一个小 tool、一个拦截 hook，也得建包、写 `cordis.patch.yml`、`dsh plugin add`。Emacs 有 `init.el`：随手写、保存即生效、复杂了再抽成包。dshrc 给 dsh 补上这个位置。
+
+片段就是**普通的 Cordis 插件模块**（`name`、`inject`、`apply(ctx)`），哪天长大了要变成正式插件包，代码原样可用。
+
+## 工作原理
+
+`node dshrc.mjs install` 往 `$DSH_HOME/cordis.patch.yml` 写入一个托管块。这是 dsh 的 home 层 patch：所有 profile 共享，优先级高于各 profile 自己的 `cordis.patch.yml`。
+
+```yaml
+# >>> dshrc >>> managed by `node dshrc.mjs install` in <本仓库>; rerun it instead of editing this block
+- insert:
+    - id: dshrc
+      name: '<本仓库>/rc/init.js'
+# Hot-reload edits under rc/. A file URL, because HMR cannot take a Windows drive path as base.
+- id: hmr
+  config:
+    base: 'file:///<本仓库>/rc'
+    root: ['.']
+# <<< dshrc <<<
+```
+
+- 第一段把 `rc/init.js` 作为一个 Loader 行加载。`rc/package.json` 声明了 `dsh.client`，所以 `rc/client.js` 同时作为浏览器侧模块下发。
+- 第二段让 dsh 的 HMR 监听 `rc/`。dsh 默认只监听 patch 文件、不监听插件源码；加上它之后保存即生效。
+
+## 安装
+
+需要 Node ≥ 22.19（dsh 本身的要求），不依赖任何 npm 包。
+
+```sh
+git clone https://github.com/tu10ng/dshrc ~/projects/dshrc
+cd ~/projects/dshrc
+node dshrc.mjs install
+```
+
+- 安装前对 `rc/` 做语法检查；写入后用 `dsh --profile web --dump-config` 校验组合配置，失败自动恢复原文件。原文件备份为 `cordis.patch.yml.bak-dshrc`。
+- 正在运行的 dsh 会通过 HMR 自动加载 rc，已打开的 Web 页面也会自动拿到浏览器侧，无需重启或刷新。
+- 可重复执行：托管块原地更新。仓库挪了位置，重新 `install` 一次即可。
+- home patch 里如果已有你自己写的 `id: hmr` 或 `id: dshrc` 行，install 会拒绝并请你先合并（home 层的 `config` 是整体替换的，两处同时写会互相覆盖）。
+
+## 写片段
+
+### 主机侧（dsh 进程内，Node）
+
+在 `rc/snippets/` 下新建一个文件：
+
+```js
+// rc/snippets/my-rules.js
+export const name = 'my-rules'
+export const inject = ['systemPrompt']
+
+export function apply(ctx) {
+  ctx.systemPrompt.section({ name: 'my:rules', order: 900, text: '- 回答用中文。', interpolate: false })
+}
+```
+
+在 `rc/init.js` 里**静态** import，并加入列表（列表顺序就是挂载顺序）：
+
+```js
+import * as myRules from './snippets/my-rules.js'
+
+const snippets = [
+  myRules,
+]
+```
+
+保存即热重载：上一版注册的一切（tool、prompt section、hook、监听器、`ctx.effect` 里的副作用）会自动撤销，不会像重复 eval `init.el` 那样叠加 hook。每个片段是独立的子插件，一个片段出错不影响其他片段。
+
+能用的扩展点和 dsh 插件完全一样，见 dsh 的 [extension cookbook](https://github.com/deepseek-ai/deepseek-harness/blob/main/docs/cookbook/extension-cookbook.md) 和各 subsystem 文档。常用的：`ctx.systemPrompt.section()`、`ctx.tools.register()`、`ctx.on('tools/pre-execute', (exec, next) => …)`、`ctx.on('session/event', …)`。
+
+### 浏览器侧（Web Client）
+
+dsh 原样下发 `rc/client.js`，不打包，所以浏览器片段直接写在这个文件里：定义一个插件对象，加进 `snippets` 列表。DOM 改动和监听器都通过 `ctx.effect(() => () => 清理)` 注册，热重载时才会被撤销。保存后已打开的页面会自动更新。
+
+### 示例（默认都不启用）
+
+| 文件 | 内容 | 实测 |
+|---|---|---|
+| `snippets/example-prompt.js` | 往每个 agent 的 system prompt 追加一段 house rules | 出现在 `ctx.systemPrompt.assemble()` 的结果里 |
+| `snippets/example-tool.js` | `current_time` tool：返回本地时间和时区 | 注册成功、执行返回 `2026-10-28 22:19:33 (Asia/Shanghai)` 这种格式 |
+| `snippets/example-guard.js` | shell 命令里有 `git push --force` 时要求确认（相当于 Emacs 的 advice） | `tools/pre-execute` 对 force push 返回 `ask`，对普通 push 返回 `allow` |
+| `client.js` 里的 `exampleCss` | 页面级 CSS | 热加载生效，卸载时样式被移除 |
+
+`current_time` 是全局注册的 tool；agent preset 如果限制了全局 tool，就看不到它。这一点没有在真实对话里验证过。
+
+## Emacs 对照
+
+| Emacs | dshrc |
+|---|---|
+| `init.el` | `rc/init.js`（主机侧）+ `rc/client.js`（浏览器侧） |
+| `(require 'foo)` | `import * as foo from './snippets/foo.js'`，再把 `foo` 加进列表 |
+| `add-hook` | `ctx.on('event', listener)` |
+| `advice-add :around` | waterfall 监听器：`ctx.on('tools/pre-execute', (exec, next) => …)` |
+| `eval-buffer` | 保存文件 |
+| `*Messages*` / `*Warnings*` | dsh 控制台里 `[dshrc]` 开头的行 + `$DSH_HOME/logs/dshrc.log` |
+| `emacs -q` | `dsh web --patch no-rc.yml`，`no-rc.yml` 内容为 `- id: dshrc` / `  disabled: true`；或者 `node dshrc.mjs uninstall` |
+| 包（`package.el`） | dsh 插件包 / bundle（`dsh plugin add`） |
+
+## 出错时
+
+- **片段 `apply` 抛错**：只有这个片段失败，其他照常；报 `[dshrc] 片段 <name> 加载失败` 和堆栈。
+- **语法错误**：dsh 拒绝这次热重载，继续运行上一个版本。dsh 自己只把它记进内部 logger、不打印；dshrc 会报 `dsh 拒绝了这次热重载: SyntaxError: …`，并用 `node --check` 定位到文件和行号。
+- **被拒绝的热重载会把同一批改动的其他文件也回滚成旧版本**。修好错误后，如果某个文件的改动没生效，把它再保存一次。
+- **启动时 rc 出错不会阻止 dsh 启动**：用户插入的行不是 required 条目，失败只打印 warning。
+- `node dshrc.mjs check`：语法检查、安装状态、组合校验，以及 `dshrc.log` 最后几条。
+
+## 限制（dsh 0.2.1-rc.2 上实测）
+
+1. **rc 里不能 `import '@deepseek-ai/dsh-*'`**，会报 `ERR_MODULE_NOT_FOUND`。dsh 的模块解析钩子只覆盖 `$DSH_HOME/profiles/**` 和 link 进 profile 的目录。片段通过 `ctx` 上的服务做事即可；真需要 import dsh 包时，就该把它做成插件包了。Node 内置模块（`node:fs` 等）和相对路径 import 都正常。
+2. **只能写 JS**：npm 安装的 dsh 不转译 TypeScript。可以用 JSDoc 写类型。
+3. **用静态 import**：HMR 只跟踪静态依赖，用 `import()` 动态加载的文件改了不会触发重载。
+4. **`rc/` 下只能有一个 Loader 行**（就是 `rc/init.js`）。`rc/package.json` 声明了 `dsh.client`，dsh 要求一个客户端包只有一个 Loader 来源；在 patch 里给 `rc/` 下的其他文件再加行，会让 Web 启动失败。
+5. **浏览器片段只能写在 `client.js` 这一个文件里**。
+6. **home 层作用于所有 profile**。headless / SDK / ACP profile 默认关闭 HMR：rc 照样加载，但不会热重载。`sdk-minimal` 没有 `hmr` 行，会多一条 patch 目标不存在的 warning。
+7. **没有沙箱**：rc 以 dsh 进程的完整权限运行。和 `init.el` 一样，只放你自己写过或读过的代码。
+8. **模型可见**：system prompt section 和 tool 会进入每次请求，消耗 token，修改后还会改变 prompt cache 的前缀。
+
+## 命令
+
+```sh
+node dshrc.mjs install    [--home <DSH_HOME>] [--profile <name>] [--no-verify]
+node dshrc.mjs uninstall  [--home <DSH_HOME>]
+node dshrc.mjs check      [--home <DSH_HOME>] [--profile <name>] [--no-verify]
+npm test                  # 单元测试；只读 rc/，不会触发正在运行的 dsh 热重载
+```
+
+## 结构
+
+```
+dshrc/
+├── dshrc.mjs                 # install / uninstall / check
+├── installer/home-patch.mjs  # 托管块的文本操作
+├── rc/                       # dsh 实际加载的目录（HMR 只监听这里）
+│   ├── package.json          # 声明 dsh.client
+│   ├── init.js               # 主机侧入口：片段列表
+│   ├── client.js             # 浏览器侧入口：浏览器片段
+│   ├── lib/runtime.js        # 挂载片段、错误隔离与上报、dshrc.log
+│   └── snippets/             # 主机片段
+└── test/
+```
+
+## 兼容
+
+在 dsh 0.2.1-rc.2（npm 全局安装）+ Windows 上开发，端到端验证过：运行中安装和卸载、主机侧与已打开页面的浏览器侧热加载、三个示例片段的实际效果、语法错误上报、片段抛错隔离。dsh 处于 developer preview，接口变化时这里可能需要跟着改。
+
+MIT.

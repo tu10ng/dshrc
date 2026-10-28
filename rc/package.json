@@ -1,0 +1,19 @@
+{
+  "name": "dshrc",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Personal DeepSeek Harness rc: host and browser snippets loaded from the home-level patch, like Emacs init.el.",
+  "type": "module",
+  "exports": {
+    ".": "./init.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "manifestVersion": 1,
+    "client": {
+      "platform": "web",
+      "immediately": true
+    }
+  }
+}

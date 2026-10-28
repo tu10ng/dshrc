@@ -1,0 +1,17 @@
+{
+  "name": "dshrc-checkout",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Emacs init.el-style personal rc for DeepSeek Harness (dsh): snippets that customize dsh without becoming a package.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.19"
+  },
+  "scripts": {
+    "test": "node --test",
+    "check": "node dshrc.mjs check",
+    "rc:install": "node dshrc.mjs install",
+    "rc:uninstall": "node dshrc.mjs uninstall"
+  }
+}

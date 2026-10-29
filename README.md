@@ -6,7 +6,7 @@
 
 dsh 的一切都是 Cordis 插件，这很好；但哪怕只想加一条 system prompt 规则、一个小 tool、一个拦截 hook，也得建包、写 `cordis.patch.yml`、`dsh plugin add`。Emacs 有 `init.el`：随手写、保存即生效、复杂了再抽成包。dshrc 给 dsh 补上这个位置。
 
-片段就是**普通的 Cordis 插件模块**（`name`、`inject`、`apply(ctx)`），哪天长大了要变成正式插件包，代码原样可用。
+片段直接写在 `rc/init.js` 里，一段一个 `rc.snippet(name, inject?, apply)`。每段都是**普通的 Cordis 插件**（`name`、`inject`、`apply(ctx)`），哪天长大了要变成正式插件包，代码原样可用。
 
 ## 工作原理
 
@@ -47,29 +47,30 @@ node dshrc.mjs install
 
 ### 主机侧（dsh 进程内，Node）
 
-在 `rc/snippets/` 下新建一个文件：
+直接写在 `rc/init.js` 里，和 `init.el` 一样一段接一段往下写：
 
 ```js
-// rc/snippets/my-rules.js
-export const name = 'my-rules'
-export const inject = ['systemPrompt']
-
-export function apply(ctx) {
+rc.snippet('my-rules', ['systemPrompt'], (ctx) => {
   ctx.systemPrompt.section({ name: 'my:rules', order: 900, text: '- 回答用中文。', interpolate: false })
-}
+})
+
+rc.snippet('hello', (ctx) => {
+  ctx.logger('dshrc').info('loaded')
+})
 ```
 
-在 `rc/init.js` 里**静态** import，并加入列表（列表顺序就是挂载顺序）：
-
-```js
-import * as myRules from './snippets/my-rules.js'
-
-const snippets = [
-  myRules,
-]
-```
+`rc.snippet(name, inject?, apply)`：`inject` 是要等待的服务（`ctx.tools`、`ctx.systemPrompt` 等），不需要服务时可以省略。片段按文件里的顺序挂载，注释掉就是禁用。`init.js` 里已经以注释的形式写好了三个示例。
 
 保存即热重载：上一版注册的一切（tool、prompt section、hook、监听器、`ctx.effect` 里的副作用）会自动撤销，不会像重复 eval `init.el` 那样叠加 hook。每个片段是独立的子插件，一个片段出错不影响其他片段。
+
+片段写长了，可以挪到 `rc/snippets/<name>.js`，写成插件模块（`export const name`、`inject`、`apply`），再在 `init.js` 里**静态** import：
+
+```js
+import * as myTool from './snippets/my-tool.js'
+rc.use(myTool)
+```
+
+必须是静态 import：dsh 的热重载只跟踪静态依赖。
 
 能用的扩展点和 dsh 插件完全一样，见 dsh 的 [extension cookbook](https://github.com/deepseek-ai/deepseek-harness/blob/main/docs/cookbook/extension-cookbook.md) 和各 subsystem 文档。常用的：`ctx.systemPrompt.section()`、`ctx.tools.register()`、`ctx.on('tools/pre-execute', (exec, next) => …)`、`ctx.on('session/event', …)`。
 
@@ -77,13 +78,13 @@ const snippets = [
 
 dsh 原样下发 `rc/client.js`，不打包，所以浏览器片段直接写在这个文件里：定义一个插件对象，加进 `snippets` 列表。DOM 改动和监听器都通过 `ctx.effect(() => () => 清理)` 注册，热重载时才会被撤销。保存后已打开的页面会自动更新。
 
-### 示例（默认都不启用）
+### 示例（默认都注释掉了）
 
-| 文件 | 内容 | 实测 |
+| 位置 | 内容 | 实测 |
 |---|---|---|
-| `snippets/example-prompt.js` | 往每个 agent 的 system prompt 追加一段 house rules | 出现在 `ctx.systemPrompt.assemble()` 的结果里 |
-| `snippets/example-tool.js` | `current_time` tool：返回本地时间和时区 | 注册成功、执行返回 `2026-10-28 22:19:33 (Asia/Shanghai)` 这种格式 |
-| `snippets/example-guard.js` | shell 命令里有 `git push --force` 时要求确认（相当于 Emacs 的 advice） | `tools/pre-execute` 对 force push 返回 `ask`，对普通 push 返回 `allow` |
+| `init.js` 的 `house-rules` | 往每个 agent 的 system prompt 追加一段 house rules | 出现在 `ctx.systemPrompt.assemble()` 的结果里 |
+| `init.js` 的 `current-time` | `current_time` tool：返回本地时间和时区 | 注册成功、执行返回 `2026-10-28 22:19:33 (Asia/Shanghai)` 这种格式 |
+| `init.js` 的 `confirm-force-push` | shell 命令里有 `git push --force` 时要求确认（相当于 Emacs 的 advice） | `tools/pre-execute` 对 force push 返回 `ask`，对普通 push 返回 `allow` |
 | `client.js` 里的 `exampleCss` | 页面级 CSS | 热加载生效，卸载时样式被移除 |
 
 `current_time` 是全局注册的 tool；agent preset 如果限制了全局 tool，就看不到它。这一点没有在真实对话里验证过。
@@ -93,7 +94,8 @@ dsh 原样下发 `rc/client.js`，不打包，所以浏览器片段直接写在�
 | Emacs | dshrc |
 |---|---|
 | `init.el` | `rc/init.js`（主机侧）+ `rc/client.js`（浏览器侧） |
-| `(require 'foo)` | `import * as foo from './snippets/foo.js'`，再把 `foo` 加进列表 |
+| 在 `init.el` 里写一段 `(add-hook …)` / `(defun …)` | 在 `init.js` 里写一段 `rc.snippet(…)` |
+| `(require 'foo)`（`lisp/foo.el`） | `import * as foo from './snippets/foo.js'` + `rc.use(foo)` |
 | `add-hook` | `ctx.on('event', listener)` |
 | `advice-add :around` | waterfall 监听器：`ctx.on('tools/pre-execute', (exec, next) => …)` |
 | `eval-buffer` | 保存文件 |
@@ -137,10 +139,10 @@ dshrc/
 ├── installer/home-patch.mjs  # 托管块的文本操作
 ├── rc/                       # dsh 实际加载的目录（HMR 只监听这里）
 │   ├── package.json          # 声明 dsh.client
-│   ├── init.js               # 主机侧入口：片段列表
+│   ├── init.js               # 主机侧入口：片段直接写在这里
 │   ├── client.js             # 浏览器侧入口：浏览器片段
-│   ├── lib/runtime.js        # 挂载片段、错误隔离与上报、dshrc.log
-│   └── snippets/             # 主机片段
+│   ├── lib/runtime.js        # rc.snippet / rc.use、错误隔离与上报、dshrc.log
+│   └── snippets/             # 写长了的片段（可选）
 └── test/
 ```
 

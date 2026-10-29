@@ -1,7 +1,8 @@
 /**
- * dshrc host runtime: mounts the snippet list from `init.js` and makes rc failures visible.
+ * dshrc host runtime: mounts the snippets `init.js` declares and makes rc failures visible.
  *
- * A snippet is an ordinary Cordis plugin module (`name`, optional `inject`, `apply`), or a module
+ * A snippet is an ordinary Cordis plugin (`name`, optional `inject`, `apply`): declared inline with
+ * {@link createRc}'s `snippet()`, or a module under `snippets/` passed to `use()`, or a module
  * whose default export is a plugin. Each snippet mounts as its own child plugin: one failing
  * snippet leaves the others running, and a hot reload disposes everything the previous
  * generation registered.
@@ -187,10 +188,10 @@ function exportRcDiagnostics(ctx, report, reported) {
 function contain(snippet, index, report, reported) {
   if (typeof snippet?.apply !== 'function') {
     // A module that default-exports a plugin (for example a Service subclass) mounts as is.
-    if (snippet?.default) return { label: snippet.default.name || `#${index}`, plugin: snippet.default }
-    throw new TypeError(`第 ${index} 个片段既没有导出 apply，也没有 default 导出的插件`)
+    if (snippet?.default) return { label: snippet.default.name || `#${index + 1}`, plugin: snippet.default }
+    throw new TypeError(`第 ${index + 1} 个片段（${snippet?.name || '未命名'}）没有 apply 函数，也不是 default 导出插件的模块`)
   }
-  const label = snippet.name || `#${index}`
+  const label = snippet.name || `#${index + 1}`
   const fail = (error) => {
     if (typeof error === 'object' && error !== null) reported.add(error)
     report.error(`片段 ${label} 加载失败:`, error)
@@ -235,4 +236,32 @@ export function mount(ctx, snippets) {
     }
   })
   report.info(`已挂载 ${labels.length} 个主机片段${labels.length ? `: ${labels.join(', ')}` : ''}`)
+}
+
+/**
+ * Create the snippet list of one `init.js` evaluation. A hot reload evaluates `init.js` again and
+ * so starts a new list, while this module may stay cached; the list therefore lives in the
+ * returned object, never in this module.
+ *
+ * @returns {{
+ *   snippet: (name: string, inject: unknown, apply?: (ctx: object, config?: unknown) => unknown) => void,
+ *   use: (snippet: object) => void,
+ *   mount: (ctx: object) => void,
+ * }} `snippet(name, inject?, apply)` declares an inline snippet (`inject` is optional, as in a
+ * Cordis plugin); `use(module)` adds a snippet module or plugin object; `mount(ctx)` mounts them
+ * in declaration order
+ */
+export function createRc() {
+  const snippets = []
+  return {
+    snippet(name, inject, apply) {
+      snippets.push(typeof inject === 'function' ? { name, apply: inject } : { name, inject, apply })
+    },
+    use(snippet) {
+      snippets.push(snippet)
+    },
+    mount(ctx) {
+      mount(ctx, snippets)
+    },
+  }
 }

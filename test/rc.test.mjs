@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, describe, test } from 'node:test'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { mount } from '../rc/lib/runtime.js'
+import { createRc, mount } from '../rc/lib/runtime.js'
 
 const RC_DIR = fileURLToPath(new URL('../rc/', import.meta.url))
 const home = mkdtempSync(join(tmpdir(), 'dshrc-test-'))
@@ -56,20 +56,74 @@ async function captureConsole(fn) {
   return lines
 }
 
-describe('snippet modules', () => {
-  test('every example snippet is a named Cordis plugin module', async () => {
-    const dir = join(RC_DIR, 'snippets')
-    for (const file of readdirSync(dir).filter(name => name.endsWith('.js'))) {
-      const snippet = await import(pathToFileURL(join(dir, file)).href)
-      assert.equal(typeof snippet.name, 'string', file)
-      assert.equal(typeof snippet.apply, 'function', file)
-    }
-  })
-
-  test('init.js is the dshrc plugin', async () => {
+describe('init.js', () => {
+  test('is the dshrc plugin', async () => {
     const init = await import(pathToFileURL(join(RC_DIR, 'init.js')).href)
     assert.equal(init.name, 'dshrc')
     assert.equal(typeof init.apply, 'function')
+  })
+
+  test('every commented-out example parses and mounts once uncommented', async () => {
+    const source = readFileSync(join(RC_DIR, 'init.js'), 'utf8')
+    const examples = source.split(/^\/\/ ─── /m).slice(1)
+      .map(section => section.split(/\r?\n/).filter(line => line.startsWith('// ')).map(line => line.slice(3)))
+      .map(lines => lines.slice(lines.findIndex(line => line.startsWith('rc.snippet('))).join('\n'))
+      .filter(code => code.startsWith('rc.snippet('))
+    assert.ok(examples.length >= 3)
+    const { ctx, mounted } = fakeContext()
+    const rc = createRc()
+    for (const code of examples) new Function('rc', code)(rc)
+    const calls = []
+    const recorder = new Proxy({}, { get: (_target, key) => (...args) => calls.push([key, ...args]) })
+    ctx.plugin = (plugin) => {
+      mounted.push(plugin)
+      plugin.apply({ systemPrompt: recorder, tools: recorder, on: (...args) => calls.push(['on', ...args]) })
+    }
+    await captureConsole(() => rc.mount(ctx))
+    assert.deepEqual(mounted.map(plugin => plugin.name), ['house-rules', 'current-time', 'confirm-force-push'])
+    assert.deepEqual(calls.map(([key]) => key), ['section', 'register', 'on'])
+    const guard = calls[2][2]
+    const exec = command => ({ name: 'bash', arguments: { command } })
+    assert.equal(guard(exec('git push --force origin main'), () => 'next').kind, 'ask')
+    assert.equal(guard(exec('git push origin main'), () => 'next'), 'next')
+  })
+})
+
+describe('createRc', () => {
+  test('mounts inline snippets in declaration order, with or without inject', async () => {
+    const { ctx, mounted } = fakeContext()
+    const rc = createRc()
+    const seen = []
+    rc.snippet('plain', () => seen.push('plain'))
+    rc.snippet('needs-tools', ['tools'], () => seen.push('needs-tools'))
+    rc.use({ name: 'module', inject: ['systemPrompt'], apply: () => seen.push('module') })
+    const lines = await captureConsole(() => rc.mount(ctx))
+    assert.deepEqual(mounted.map(({ plugin }) => [plugin.name, plugin.inject]), [
+      ['plain', undefined],
+      ['needs-tools', ['tools']],
+      ['module', ['systemPrompt']],
+    ])
+    assert.deepEqual(seen, ['plain', 'needs-tools', 'module'])
+    assert.match(lines.at(-1), /已挂载 3 个主机片段: plain, needs-tools, module/)
+  })
+
+  test('keeps each list separate, as a re-evaluated init.js needs', async () => {
+    const first = createRc()
+    const second = createRc()
+    first.snippet('old', () => {})
+    second.snippet('new', () => {})
+    const { ctx, mounted } = fakeContext()
+    await captureConsole(() => second.mount(ctx))
+    assert.deepEqual(mounted.map(({ plugin }) => plugin.name), ['new'])
+  })
+
+  test('reports an inline snippet declared without apply, by name', async () => {
+    const { ctx, mounted } = fakeContext()
+    const rc = createRc()
+    rc.snippet('typo', ['tools'])
+    const lines = await captureConsole(() => rc.mount(ctx))
+    assert.equal(mounted.length, 0)
+    assert.ok(lines.some(line => line.includes('第 1 个片段（typo）没有 apply 函数')))
   })
 })
 
@@ -113,7 +167,7 @@ describe('mount', () => {
     const lines = await captureConsole(() => mount(ctx, [{ default: service }, { name: 'empty' }]))
     assert.equal(mounted.length, 1)
     assert.equal(mounted[0].plugin, service)
-    assert.ok(lines.some(line => line.includes('第 1 个片段既没有导出 apply')))
+    assert.ok(lines.some(line => line.includes('第 2 个片段（empty）没有 apply 函数')))
   })
 
   test('reports a rejected hot reload once, with a hint, even without a file name', async () => {

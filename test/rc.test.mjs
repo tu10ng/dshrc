@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, describe, test } from 'node:test'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { runInNewContext } from 'node:vm'
 import { createRc, mount } from '../rc/lib/runtime.js'
 
 const RC_DIR = fileURLToPath(new URL('../rc/', import.meta.url))
@@ -201,5 +202,116 @@ describe('mount', () => {
     const exported = lines.filter(line => line.includes('dsh loader'))
     assert.equal(exported.length, 1)
     assert.match(exported[0], /dsh loader warn: cannot import file:.*\/rc\/snippets\/x\.js/)
+  })
+})
+
+describe('client.js', () => {
+  /**
+   * Evaluate client.js as the page would and return its root plugin.
+   * @param {Map<string, string>} storage - backing store of the fake localStorage
+   * @returns {object} the root plugin
+   */
+  function loadClient(storage) {
+    let loaded
+    runInNewContext(readFileSync(join(RC_DIR, 'client.js'), 'utf8'), {
+      window: { __ModuleLoader__: { load: (module) => { loaded = module } } },
+      localStorage: {
+        getItem: key => storage.get(key) ?? null,
+        setItem: (key, value) => storage.set(key, String(value)),
+        removeItem: key => storage.delete(key),
+      },
+      console: { log() {}, error() {} },
+    })
+    return loaded.factory(() => undefined)
+  }
+
+  /**
+   * A page reduced to what remember-panel uses: ctx.layout's panel selection and the `main` slot
+   * registry. Unregistering the selected panel falls back to the Conversation, as dsh's layout does.
+   * @param {string[]} keys - main panels registered at load
+   * @returns {object} the page context and controls
+   */
+  function fakePage(keys) {
+    let info = { activePanelId: null }
+    const panelListeners = new Set()
+    const mainListeners = new Set()
+    const registeredKeys = new Set(keys)
+    const disposers = []
+    const notify = listeners => [...listeners].forEach(listener => listener())
+    const page = {
+      layout: {
+        panelInfo: {
+          getSnapshot: () => info,
+          subscribe: (listener) => {
+            panelListeners.add(listener)
+            return () => panelListeners.delete(listener)
+          },
+        },
+        selectPanel(id) {
+          if (id !== null && !registeredKeys.has(id)) throw new Error(`main panel "${id}" is not registered`)
+          info = { activePanelId: id }
+          notify(panelListeners)
+        },
+      },
+      slots: {
+        entries: () => [...registeredKeys].map(key => ({ options: { key } })),
+        subscribe: (_key, listener) => {
+          mainListeners.add(listener)
+          return () => mainListeners.delete(listener)
+        },
+      },
+      effect: setup => disposers.push(setup()),
+      plugin: plugin => plugin.apply(page),
+      register(key) {
+        registeredKeys.add(key)
+        notify(mainListeners)
+      },
+      unregister(key) {
+        registeredKeys.delete(key)
+        if (info.activePanelId === key) {
+          info = { activePanelId: null }
+          notify(panelListeners)
+        }
+        notify(mainListeners)
+      },
+      dispose: () => disposers.splice(0).forEach(dispose => dispose()),
+      active: () => info.activePanelId,
+    }
+    return page
+  }
+
+  test('remember-panel selects the saved panel again once it registers after a reload', () => {
+    const storage = new Map()
+    const before = fakePage(['plugins', 'global-todo'])
+    loadClient(storage).apply(before)
+    before.layout.selectPanel('global-todo')
+    assert.equal(storage.get('dshrc.active-panel'), 'global-todo')
+
+    // A plugin panel registers after the rc has mounted.
+    const after = fakePage(['plugins'])
+    loadClient(storage).apply(after)
+    assert.equal(after.active(), null)
+    after.register('global-todo')
+    assert.equal(after.active(), 'global-todo')
+  })
+
+  test('remember-panel forgets the Conversation, waits out a reloading panel, and disposes cleanly', () => {
+    const storage = new Map()
+    const page = fakePage(['plugins'])
+    loadClient(storage).apply(page)
+    page.layout.selectPanel('plugins')
+    page.layout.selectPanel(null)
+    assert.equal(storage.has('dshrc.active-panel'), false)
+
+    page.layout.selectPanel('plugins')
+    page.unregister('plugins')
+    assert.equal(page.active(), null)
+    assert.equal(storage.get('dshrc.active-panel'), 'plugins')
+    page.register('plugins')
+    assert.equal(page.active(), 'plugins')
+
+    page.dispose()
+    page.layout.selectPanel(null)
+    assert.equal(storage.get('dshrc.active-panel'), 'plugins')
   })
 })

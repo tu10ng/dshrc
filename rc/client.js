@@ -33,8 +33,51 @@ window.__ModuleLoader__.load({
     }
     void exampleCss
 
+    /**
+     * Keep the selected global panel (待办, 插件, 自动化任务, ...) across a page reload. dsh keeps
+     * that selection in memory only and restores just the last Session, so a reload lands on the
+     * Conversation. This saves the selection per origin and selects it again once its panel is
+     * registered: a plugin's panel can register after this snippet mounts.
+     */
+    const rememberPanel = {
+      name: 'remember-panel',
+      inject: ['layout', 'slots'],
+      apply(ctx) {
+        const key = 'dshrc.active-panel'
+        const active = () => ctx.layout.panelInfo.getSnapshot().activePanelId
+        const registered = id => ctx.slots.entries('main').some(entry => entry.options.key === id)
+        // The panel to select once it is registered: the saved one, or one whose plugin is reloading.
+        let pending = localStorage.getItem(key)
+        let last = active()
+        const restore = () => {
+          if (pending === null || !registered(pending)) return
+          const id = pending
+          pending = null
+          if (active() !== id) ctx.layout.selectPanel(id)
+        }
+        ctx.effect(() => ctx.layout.panelInfo.subscribe(() => {
+          const id = active()
+          if (id === last) return
+          const previous = last
+          last = id
+          if (id === null && previous !== null && !registered(previous)) {
+            // dsh shows the Conversation while a selected panel is unregistered (its plugin is
+            // reloading or was disabled); select the panel again when it comes back.
+            pending = previous
+            return
+          }
+          pending = null
+          if (id === null) localStorage.removeItem(key)
+          else localStorage.setItem(key, id)
+        }))
+        ctx.effect(() => ctx.slots.subscribe('main', restore))
+        restore()
+      },
+    }
+
     /** Browser snippets, in mount order. */
     const snippets = [
+      rememberPanel,
       // exampleCss,
     ]
 

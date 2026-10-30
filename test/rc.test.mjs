@@ -225,9 +225,35 @@ describe('client.js', () => {
     return loaded.factory(() => undefined)
   }
 
+  /** dsh's LocaleRuntime reduced to zh lookup, cached binds and the revision registrations bump. */
+  class FakeLocale {
+    dicts = new Map()
+    bound = new Map()
+    revision = 0
+    register(ns, locale, dict) {
+      const key = `${ns}/${locale}`
+      if (this.dicts.has(key)) throw new Error(`locale namespace "${ns}" already has locale "${locale}"`)
+      this.dicts.set(key, dict)
+      this.revision++
+      return () => {
+        this.dicts.delete(key)
+        this.revision++
+      }
+    }
+    bind(ns) {
+      if (!this.bound.has(ns)) this.bound.set(ns, (key, params) => this.translate(ns, key, params))
+      return this.bound.get(ns)
+    }
+    translate(ns, key, params) {
+      const template = this.dicts.get(`${ns}/zh`)?.[key] ?? key
+      return params ? template.replace(/\{(\w+)\}/g, (match, name) => name in params ? String(params[name]) : match) : template
+    }
+  }
+
   /**
-   * A page reduced to what remember-panel uses: ctx.layout's panel selection and the `main` slot
-   * registry. Unregistering the selected panel falls back to the Conversation, as dsh's layout does.
+   * A page reduced to what the snippets use: ctx.layout's panel selection, the `main` slot
+   * registry and ctx.locale. Unregistering the selected panel falls back to the Conversation, as
+   * dsh's layout does.
    * @param {string[]} keys - main panels registered at load
    * @returns {object} the page context and controls
    */
@@ -260,6 +286,7 @@ describe('client.js', () => {
           return () => mainListeners.delete(listener)
         },
       },
+      locale: new FakeLocale(),
       effect: setup => disposers.push(setup()),
       plugin: plugin => plugin.apply(page),
       register(key) {
@@ -313,5 +340,29 @@ describe('client.js', () => {
     page.dispose()
     page.layout.selectPanel(null)
     assert.equal(storage.get('dshrc.active-panel'), 'plugins')
+  })
+
+  test('ui-text replaces text for translations bound before it mounted, and restores it on dispose', () => {
+    const page = fakePage([])
+    page.locale.register('settings.account', 'zh', { signedIn: '已登录 DeepSeek', signedOut: '尚未登录' })
+    const t = page.locale.bind('settings.account')
+    const registered = page.locale.revision
+    loadClient(new Map()).apply(page)
+    const text = t('signedIn')
+    assert.equal(typeof text, 'string')
+    assert.notEqual(text, '已登录 DeepSeek')
+    assert.equal(t('signedOut'), '尚未登录')
+    // Republished, so text already on screen re-renders.
+    const mounted = page.locale.revision
+    assert.ok(mounted > registered)
+
+    page.dispose()
+    assert.equal(t('signedIn'), '已登录 DeepSeek')
+    assert.equal(Object.hasOwn(page.locale, 'translate'), false)
+    assert.ok(page.locale.revision > mounted)
+
+    // A hot reload mounts it again.
+    loadClient(new Map()).apply(page)
+    assert.equal(t('signedIn'), text)
   })
 })

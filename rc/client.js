@@ -75,9 +75,47 @@ window.__ModuleLoader__.load({
       },
     }
 
+    /**
+     * Replace UI text, in every language. dsh's locale service has no override and refuses a
+     * second dictionary for a namespace, so this wraps its lookup. Namespaces and keys are those
+     * the packages register (`ctx.locale.register(ns, { zh, en })` in their lib/client.js).
+     */
+    const uiText = {
+      name: 'ui-text',
+      inject: ['locale'],
+      apply(ctx) {
+        const texts = {
+          'settings.account': {
+            // Account label at the bottom left of the sidebar, shown when the DeepSeek profile has
+            // no name ("已登录 DeepSeek"). Settings → 账号与余额 shows it in that case too.
+            signedIn: 'tu10ng的dsh',
+          },
+        }
+        const locale = ctx.locale
+        ctx.effect(() => {
+          const own = Object.hasOwn(locale, 'translate')
+          const previous = locale.translate
+          locale.translate = function (ns, key, params) {
+            if (!Object.hasOwn(texts, ns) || !Object.hasOwn(texts[ns], key)) return previous.call(this, ns, key, params)
+            const text = texts[ns][key]
+            return params ? text.replace(/\{(\w+)\}/g, (match, name) => name in params ? String(params[name]) : match) : text
+          }
+          // A dictionary registration republishes the locale, so text already on screen re-renders.
+          const republish = () => locale.register('dshrc.ui-text', 'en', {})()
+          republish()
+          return () => {
+            if (own) locale.translate = previous
+            else delete locale.translate
+            republish()
+          }
+        })
+      },
+    }
+
     /** Browser snippets, in mount order. */
     const snippets = [
       rememberPanel,
+      uiText,
       // exampleCss,
     ]
 

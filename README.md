@@ -142,7 +142,7 @@ dsh 的 locale 服务没有覆盖接口，同一命名空间同一语言再注�
 node dshrc.mjs install    [--home <DSH_HOME>] [--profile <name>] [--no-verify]
 node dshrc.mjs uninstall  [--home <DSH_HOME>]
 node dshrc.mjs check      [--home <DSH_HOME>] [--profile <name>] [--no-verify]
-npm test                  # 单元测试；只读 rc/，不会触发正在运行的 dsh 热重载
+npm test                  # dshrc 自身（加载器、安装器）的单元测试；片段是配置，不写测试
 ```
 
 ## 结构
